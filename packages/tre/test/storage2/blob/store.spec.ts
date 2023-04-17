@@ -114,7 +114,9 @@ test("FileBlobStore: put: file-system specific functionality", async (t) => {
   // Check created file is read-only
   const id = await store.put(new Blob(["😈"]).stream());
   const filePath = path.join(root, id);
-  await t.throwsAsync(fs.writeFile(filePath, "new"), { code: "EACCES" });
+  await t.throwsAsync(fs.writeFile(filePath, "new"), {
+    code: process.platform === "win32" ? "EPERM" : "EACCES",
+  });
 });
 
 const deleteMacro: Macro<[BlobStoreFactory]> = {
