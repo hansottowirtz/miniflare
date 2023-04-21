@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { z } from "zod";
 import { Log } from "../../shared";
 import { RangeStoredValueMeta, Storage } from "../../storage";
-import { _parseRanges } from "../shared";
+import { _parseRangeHeader } from "../../storage2";
 import { InvalidRange, NoSuchKey } from "./errors";
 import {
   R2Object,
@@ -67,11 +67,11 @@ export class R2Gateway {
 
     let range = options.range ?? {};
     if (options.rangeHeader !== undefined) {
-      const ranges = _parseRanges(options.rangeHeader, meta.size);
+      const ranges = _parseRangeHeader(meta.size, options.rangeHeader);
       if (ranges?.length === 1) {
         // If the header contained a single range, convert it to an R2Range.
         // Note `start` and `end` are inclusive.
-        const [start, end] = ranges[0];
+        const { start, end } = ranges[0];
         range = { offset: start, length: end - start + 1 };
       } else {
         // If the header was invalid, or contained multiple ranges, just return

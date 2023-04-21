@@ -1,11 +1,7 @@
 import assert from "assert";
 import { ReadableStream } from "stream/web";
 import { base64Decode, base64Encode, defaultClock } from "../shared";
-import {
-  InclusiveRange,
-  MultipartOptions,
-  MultipartReadableStream,
-} from "./blob";
+import { MultipartOptions, PartialReadableStream, Ranges } from "./blob";
 import { TypedDatabase } from "./sql";
 import { NewStorage } from "./storage";
 
@@ -14,12 +10,11 @@ export interface KeyEntry<Metadata = unknown> {
   expiration?: number; // milliseconds since unix epoch
   metadata?: Metadata;
 }
-export interface KeyValueEntry<Metadata = unknown> extends KeyEntry<Metadata> {
-  value: ReadableStream<Uint8Array>;
-}
-export interface KeyMultipartValueEntry<Metadata = unknown>
-  extends KeyEntry<Metadata> {
-  value: MultipartReadableStream;
+export interface KeyValueEntry<
+  Metadata = unknown,
+  Value = PartialReadableStream
+> extends KeyEntry<Metadata> {
+  value: Value;
 }
 
 export interface KeyEntriesQuery {
@@ -120,7 +115,7 @@ export class KeyValueStorage<Metadata = unknown> {
   }
 
   #hasExpired(entry: Pick<Row, "expiration">) {
-    return entry.expiration !== null && entry.expiration < this.clock();
+    return entry.expiration !== null && entry.expiration <= this.clock();
   }
 
   #backgroundDelete(blobId: string) {
@@ -132,22 +127,11 @@ export class KeyValueStorage<Metadata = unknown> {
     queueMicrotask(() => this.storage.blob.delete(blobId).catch(() => {}));
   }
 
-  get(
-    key: string,
-    range?: InclusiveRange
-  ): Promise<KeyValueEntry<Metadata> | null>;
-  get(
-    key: string,
-    ranges: InclusiveRange[],
-    optsFactory: (metadata: Metadata) => MultipartOptions
-  ): Promise<KeyMultipartValueEntry<Metadata> | null>;
   async get(
     key: string,
-    ranges?: InclusiveRange | InclusiveRange[],
-    optsFactory?: (metadata: Metadata) => MultipartOptions
-  ): Promise<
-    KeyValueEntry<Metadata> | KeyMultipartValueEntry<Metadata> | null
-  > {
+    range?: Ranges,
+    multipartOptsFactory?: (metadata: Metadata) => MultipartOptions
+  ): Promise<KeyValueEntry<Metadata> | null> {
     // Try to get key from metadata store, returning null if not found
     const row = this.#stmts.getByKey.get({ key });
     if (row === undefined) return null;
@@ -165,30 +149,17 @@ export class KeyValueStorage<Metadata = unknown> {
       return null;
     }
 
-    const entry = rowEntry<Metadata>(row);
-    if (Array.isArray(ranges)) {
-      // If this is a multi-range request, get multipart options from metadata,
-      // then return a multipart stream...
-      assert(optsFactory !== undefined && entry.metadata !== undefined);
-      const opts = optsFactory(entry.metadata);
-      const value = await this.storage.blob.get(row.blob_id, ranges, opts);
-      if (value === null) return null;
-
-      const valueEntry = entry as KeyMultipartValueEntry<Metadata>;
-      valueEntry.value = value;
-      return valueEntry;
-    } else {
-      // ...otherwise just return a regular stream
-      const value = await this.storage.blob.get(row.blob_id, ranges);
-      if (value === null) return null;
-
-      const valueEntry = entry as KeyValueEntry<Metadata>;
-      valueEntry.value = value;
-      return valueEntry;
-    }
+    const entry = rowEntry(row) as KeyValueEntry<Metadata>;
+    const opts = entry.metadata && multipartOptsFactory?.(entry.metadata);
+    const value = await this.storage.blob.get(row.blob_id, range, opts);
+    if (value === null) return null;
+    entry.value = value;
+    return entry;
   }
 
-  async put(entry: KeyValueEntry<Metadata>): Promise<void> {
+  async put(
+    entry: KeyValueEntry<Metadata, ReadableStream<Uint8Array>>
+  ): Promise<void> {
     // Empty keys are not permitted because we default to starting after "" when
     // listing. See `list()` for more details.
     assert.notStrictEqual(entry.key, "");

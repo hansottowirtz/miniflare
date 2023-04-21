@@ -1,13 +1,18 @@
 import assert from "assert";
 import crypto from "crypto";
 import http from "http";
-import { AddressInfo } from "net";
+import { ReadableStream } from "stream/web";
 import CachePolicy from "http-cache-semantics";
 import { Headers, HeadersInit, Request, Response, fetch } from "../../http";
-import { Clock, Log, millisToSeconds } from "../../shared";
+import { Clock, Log } from "../../shared";
 import { Storage } from "../../storage";
+import {
+  KeyValueEntry,
+  KeyValueStorage,
+  PartialReadableStream,
+  RangeNotSatisfiableError,
+} from "../../storage2";
 import { isSitesRequest } from "../kv";
-import { _getRangeResponse } from "../shared";
 import { CacheMiss, PurgeFailure, StorageFailure } from "./errors";
 
 interface CacheMetadata {
@@ -92,12 +97,11 @@ function parseUTCDate(value: string): number {
   return utcDateRegexp.test(value) ? Date.parse(value) : NaN;
 }
 
-// Lifted from Miniflare 2
 function getMatchResponse(
   reqHeaders: Headers,
   resStatus: number,
   resHeaders: Headers,
-  resBody: Uint8Array
+  resBody: PartialReadableStream
 ): Response {
   // If `If-None-Match` is set, perform a conditional request:
   // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/If-None-Match
@@ -130,133 +134,144 @@ function getMatchResponse(
     }
   }
 
-  // If `Range` is set, return a partial response:
+  // If `Range` was set, return a partial response:
   // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Range
-  const reqRangeHeader = reqHeaders.get("Range");
-  if (reqRangeHeader !== null) {
-    return _getRangeResponse(reqRangeHeader, resStatus, resHeaders, resBody);
+  if (resBody.range !== undefined) {
+    resStatus = 206; // Partial Content
+    if (Array.isArray(resBody.range)) {
+      // TypeScript can't seem to narrow to `MultipartPartialReadableStream`
+      // from `isArray` check
+      assert("multipartContentType" in resBody);
+      resHeaders.set("Content-Type", resBody.multipartContentType);
+    } else {
+      const { start, end } = resBody.range;
+      resHeaders.set("Content-Range", `bytes ${start}-${end}/${resBody.size}`);
+      resHeaders.set("Content-Length", `${end - start + 1}`);
+    }
   }
 
-  // Otherwise, return the full response
   return new Response(resBody, { status: resStatus, headers: resHeaders });
 }
 
-class CacheResponse {
-  constructor(readonly metadata: CacheMetadata, readonly value: Uint8Array) {}
-  toResponse(): Response {
-    return new Response(this.value, {
-      status: this.metadata.status,
-      headers: this.metadata.headers,
-    });
-  }
-}
-
-interface ParsedHttpResponse {
-  headers: Headers;
-  status: number;
-  body: Uint8Array;
-}
 class HttpParser {
-  readonly server: http.Server;
-  readonly responses: Map<string, Uint8Array> = new Map();
-  readonly connected: Promise<void>;
   private static INSTANCE: HttpParser;
   static get(): HttpParser {
     HttpParser.INSTANCE ??= new HttpParser();
     return HttpParser.INSTANCE;
   }
+
+  readonly #responses: Map<string, ReadableStream<Uint8Array>> = new Map();
+  readonly #ready: Promise<URL>;
+
   private constructor() {
-    this.server = http.createServer(this.listen.bind(this)).unref();
-    this.connected = new Promise((accept) => {
-      this.server.listen(0, "localhost", accept);
+    const server = http.createServer(this.#listen).unref();
+    this.#ready = new Promise((resolve) => {
+      server.listen(0, "localhost", () => {
+        const address = server.address();
+        assert(address !== null && typeof address === "object");
+        resolve(new URL(`http://localhost:${address.port}`));
+      });
     });
   }
-  private listen(request: http.IncomingMessage, response: http.ServerResponse) {
-    assert(request.url !== undefined);
-    assert(response.socket !== null);
-    const array = this.responses.get(request.url);
-    assert(array !== undefined);
+
+  #listen: http.RequestListener = async (req, res) => {
+    assert(req.url !== undefined);
+    assert(res.socket !== null);
+    const stream = this.#responses.get(req.url);
+    assert(stream !== undefined);
     // Write response to parse directly to underlying socket
-    response.socket.write(array);
-    response.socket.end();
-  }
-  public async parse(response: Uint8Array): Promise<ParsedHttpResponse> {
-    await this.connected;
+    for await (const chunk of stream) res.socket.write(chunk);
+    res.socket.end();
+  };
+
+  async parse(response: ReadableStream<Uint8Array>): Promise<Response> {
+    const baseURL = await this.#ready;
     // Since multiple parses can be in-flight at once, an identifier is needed
     const id = `/${crypto.randomBytes(16).toString("hex")}`;
-    this.responses.set(id, response);
-    const address = this.server.address()! as AddressInfo;
+    this.#responses.set(id, response);
     try {
-      const parsedResponse = await fetch(
-        `http://localhost:${address.port}${id}`
-      );
-      const body = await parsedResponse.arrayBuffer();
-      return {
-        headers: parsedResponse.headers,
-        status: parsedResponse.status,
-        body: new Uint8Array(body),
-      };
+      return await fetch(new URL(id, baseURL));
     } finally {
-      this.responses.delete(id);
+      this.#responses.delete(id);
     }
   }
 }
 
 export class CacheGateway {
+  private readonly storage: KeyValueStorage<CacheMetadata>;
+
   constructor(
     private readonly log: Log,
-    private readonly storage: Storage,
+    legacyStorage: Storage,
     private readonly clock: Clock
-  ) {}
+  ) {
+    const storage = legacyStorage.getNewStorage();
+    this.storage = new KeyValueStorage(storage, clock);
+  }
 
   async match(request: Request, cacheKey?: string): Promise<Response> {
     // Never cache Workers Sites requests, so we always return on-disk files
     if (isSitesRequest(request)) throw new CacheMiss();
-
     cacheKey ??= request.url;
-    const cached = await this.storage.get<CacheMetadata>(cacheKey);
+
+    const range = request.headers.get("Range") ?? undefined;
+    let resHeaders: Headers | undefined;
+    let cached: KeyValueEntry<CacheMetadata> | null;
+    try {
+      cached = await this.storage.get(cacheKey, range, (metadata) => {
+        resHeaders = new Headers(metadata.headers);
+        const contentType = resHeaders.get("Content-Type");
+        return { contentType: contentType ?? undefined };
+      });
+    } catch (e) {
+      if (e instanceof RangeNotSatisfiableError) {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            "Content-Range": `bytes */${e.totalSize}`,
+            "CF-Cache-Status": "HIT",
+          },
+        });
+      }
+      throw e;
+    }
     if (cached?.metadata === undefined) throw new CacheMiss();
 
-    const response = new CacheResponse(
-      cached.metadata,
-      cached.value
-    ).toResponse();
-    response.headers.set("CF-Cache-Status", "HIT");
+    // Avoid re-constructing headers if we already extracted multipart options
+    resHeaders ??= new Headers(cached.metadata.headers);
+    resHeaders.set("CF-Cache-Status", "HIT");
 
     return getMatchResponse(
       request.headers,
       cached.metadata.status,
-      response.headers,
+      resHeaders,
       cached.value
     );
   }
 
   async put(
     request: Request,
-    value: Uint8Array,
+    value: ReadableStream<Uint8Array>,
     cacheKey?: string
   ): Promise<Response> {
-    // Never cache Workers Sites requests, so we always return on-disk files
+    // Never cache Workers Sites requests, so we always return on-disk files.
     if (isSitesRequest(request)) return new Response(null, { status: 204 });
 
     const response = await HttpParser.get().parse(value);
+    assert(response.body !== null);
 
     const { storable, expiration, headers } = getExpiration(
       this.clock,
       request,
-      new Response(response.body, {
-        status: response.status,
-        headers: response.headers,
-      })
+      response
     );
-    if (!storable) {
-      throw new StorageFailure();
-    }
+    if (!storable) throw new StorageFailure();
 
     cacheKey ??= request.url;
-    await this.storage.put<CacheMetadata>(cacheKey, {
+    await this.storage.put({
+      key: cacheKey,
       value: response.body,
-      expiration: millisToSeconds(this.clock() + expiration),
+      expiration: this.clock() + expiration,
       metadata: {
         headers: Object.entries(headers),
         status: response.status,

@@ -4,15 +4,13 @@ import fs from "fs/promises";
 import path from "path";
 import { arrayBuffer } from "stream/consumers";
 import { ReadableStream } from "stream/web";
+import { Ranges } from "./range";
 import {
-  InclusiveRange,
   MultipartOptions,
-  MultipartReadableStream,
+  PartialReadableStream,
   createArrayReadableStream,
   createFileReadableStream,
   createFileWritableStream,
-  createMultipartArrayReadableStream,
-  createMultipartFileReadableStream,
 } from "./streams";
 
 const MODE_READ_ONLY = 0o444;
@@ -37,13 +35,9 @@ export interface BlobStore {
 
   get(
     id: BlobId,
-    range?: InclusiveRange
-  ): Promise<ReadableStream<Uint8Array> | null>;
-  get(
-    id: BlobId,
-    ranges: InclusiveRange[],
-    opts: MultipartOptions
-  ): Promise<MultipartReadableStream | null>;
+    range?: Ranges,
+    opts?: MultipartOptions
+  ): Promise<PartialReadableStream | null>;
 
   put(stream: ReadableStream<Uint8Array>): Promise<BlobId>;
 
@@ -60,28 +54,14 @@ function generateBlobId(): BlobId {
 export class MemoryBlobStore implements BlobStore {
   readonly #blobs = new Map<string, Uint8Array>();
 
-  get(
-    id: BlobId,
-    range?: InclusiveRange
-  ): Promise<ReadableStream<Uint8Array> | null>;
-  get(
-    id: BlobId,
-    ranges: InclusiveRange[],
-    opts: MultipartOptions
-  ): Promise<MultipartReadableStream | null>;
   async get(
     id: BlobId,
-    ranges?: InclusiveRange | InclusiveRange[],
+    range?: Ranges,
     opts?: MultipartOptions
-  ): Promise<ReadableStream<Uint8Array> | MultipartReadableStream | null> {
+  ): Promise<PartialReadableStream | null> {
     const blob = this.#blobs.get(id);
     if (blob === undefined) return null;
-    if (Array.isArray(ranges)) {
-      assert(opts !== undefined);
-      return createMultipartArrayReadableStream(blob, ranges, opts);
-    } else {
-      return createArrayReadableStream(blob, ranges);
-    }
+    return createArrayReadableStream(blob, range, opts);
   }
 
   async put(stream: ReadableStream<Uint8Array>): Promise<BlobId> {
@@ -113,32 +93,17 @@ export class FileBlobStore implements BlobStore {
     return filePath.startsWith(this.#root) ? filePath : null;
   }
 
-  get(
-    id: BlobId,
-    range?: InclusiveRange
-  ): Promise<ReadableStream<Uint8Array> | null>;
-  get(
-    id: BlobId,
-    ranges: InclusiveRange[],
-    opts: MultipartOptions
-  ): Promise<MultipartReadableStream | null>;
   async get(
     id: BlobId,
-    ranges?: InclusiveRange | InclusiveRange[],
+    range?: Ranges,
     opts?: MultipartOptions
-  ): Promise<ReadableStream<Uint8Array> | MultipartReadableStream | null> {
+  ): Promise<PartialReadableStream | null> {
     // Get path for this ID, returning null if it's outside the root
     const filePath = this.#idFilePath(id);
     if (filePath === null) return null;
     // Get correct response for range, returning null if not found
     try {
-      // The caller should only pass an array with >= 2 ranges, but allow less
-      if (Array.isArray(ranges)) {
-        assert(opts !== undefined);
-        return await createMultipartFileReadableStream(filePath, ranges, opts);
-      } else {
-        return await createFileReadableStream(filePath, ranges);
-      }
+      return await createFileReadableStream(filePath, range, opts);
     } catch (e: unknown) {
       if (
         typeof e === "object" &&

@@ -1,3 +1,4 @@
+import assert from "assert";
 import { ReadableStream, TransformStream } from "stream/web";
 import {
   Clock,
@@ -172,6 +173,7 @@ export class KVGateway {
     validateGetOptions(key, options);
     const entry = await this.storage.get(key);
     if (entry === null) return;
+    assert(entry.value.range === undefined);
     return {
       value: entry.value,
       expiration: maybeApply(millisToSeconds, entry.expiration),

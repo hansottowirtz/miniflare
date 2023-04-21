@@ -1,14 +1,13 @@
-import assert, { AssertionError } from "assert";
+import assert from "assert";
 import fs from "fs/promises";
 import path from "path";
 import { arrayBuffer } from "stream/consumers";
 import { TextEncoderStream } from "stream/web";
 import {
+  RangeNotSatisfiableError,
   createArrayReadableStream,
   createFileReadableStream,
   createFileWritableStream,
-  createMultipartArrayReadableStream,
-  createMultipartFileReadableStream,
 } from "@miniflare/tre";
 import test, { Macro } from "ava";
 import { useTmp, utf8Decode, utf8Encode } from "../../test-shared";
@@ -29,7 +28,7 @@ const doubleData = new Uint8Array(arrayInit(512, (i) => Math.floor(i / 2)));
 const tripleData = new Uint8Array(arrayInit(768, (i) => Math.floor(i / 3)));
 const testData = concat(singleData, doubleData, tripleData);
 
-const readableMacro: Macro<[typeof createFileReadableStream]> = {
+const unipartMacro: Macro<[typeof createFileReadableStream]> = {
   async exec(t, f) {
     const tmp = await useTmp(t);
     const testPath = path.join(tmp, "test.txt");
@@ -45,6 +44,10 @@ const readableMacro: Macro<[typeof createFileReadableStream]> = {
     );
     t.deepEqual((await reader.read()).value, tripleData.slice(256));
     t.true((await reader.read()).done);
+
+    // Check no ranges returns all data
+    stream = await f(testPath, []);
+    t.deepEqual(new Uint8Array(await arrayBuffer(stream)), testData);
 
     // Check with BYOB reader
     stream = await f(testPath);
@@ -80,26 +83,37 @@ const readableMacro: Macro<[typeof createFileReadableStream]> = {
     stream = await f(testPath, { start: 7, end: 7 });
     t.deepEqual(new Uint8Array(await arrayBuffer(stream)), new Uint8Array([7]));
 
+    // Check with string range
+    stream = await f(testPath, "bytes=1-3");
+    t.deepEqual(
+      new Uint8Array(await arrayBuffer(stream)),
+      new Uint8Array([1, 2, 3])
+    );
+
     // Check rejects invalid ranges
     await t.throwsAsync(f(testPath, { start: -1, end: 5 }), {
-      instanceOf: AssertionError,
+      instanceOf: RangeNotSatisfiableError,
       message: "Invalid range: [-1,5]",
     });
     await t.throwsAsync(f(testPath, { start: 5, end: 3 }), {
-      instanceOf: AssertionError,
+      instanceOf: RangeNotSatisfiableError,
       message: "Invalid range: [5,3]",
+    });
+    await t.throwsAsync(f(testPath, "bytes=5-3"), {
+      instanceOf: RangeNotSatisfiableError,
+      message: 'Invalid range: "bytes=5-3"',
     });
   },
 };
 
 test(
   "createArrayReadableStream: streams contents from array",
-  readableMacro,
-  async (_testPath, range) => createArrayReadableStream(testData, range)
+  unipartMacro,
+  (_testPath, range) => createArrayReadableStream(testData, range)
 );
 test(
   "createFileReadableStream: streams file contents from disk",
-  readableMacro,
+  unipartMacro,
   createFileReadableStream
 );
 test("createFileReadableStream: rejects if file not found", async (t) => {
@@ -122,26 +136,23 @@ function crlfLines(...lines: (string | Uint8Array)[]): Uint8Array {
   );
 }
 
-const multipartMacro: Macro<[typeof createMultipartFileReadableStream]> = {
+const multipartMacro: Macro<[typeof createFileReadableStream]> = {
   async exec(t, f) {
     const tmp = await useTmp(t);
     const testPath = path.join(tmp, "test.txt");
     await fs.writeFile(testPath, testData);
 
     // Check with multiple (including single byte) ranges and default reader
-    let stream = await f(
-      testPath,
-      [
-        { start: 5, end: 10 },
-        { start: 23, end: 29 },
-        { start: 0, end: 0 },
-        { start: 3, end: 3 },
-      ],
-      { contentLength: testData.byteLength }
-    );
+    let stream = await f(testPath, [
+      { start: 5, end: 10 },
+      { start: 23, end: 29 },
+      { start: 0, end: 0 },
+      { start: 3, end: 3 },
+    ]);
+    assert(Array.isArray(stream.range) && "multipartContentType" in stream);
     let [contentType, boundary] = stream.multipartContentType.split("=");
     t.is(contentType, "multipart/byteranges; boundary");
-    let actualArray = new Uint8Array(await arrayBuffer(stream.body));
+    let actualArray = new Uint8Array(await arrayBuffer(stream));
     let expectedArray = crlfLines(
       `--${boundary}`,
       "Content-Range: bytes 5-10/1536",
@@ -163,13 +174,15 @@ const multipartMacro: Macro<[typeof createMultipartFileReadableStream]> = {
     );
     t.deepEqual(actualArray, expectedArray);
 
-    // Check with single range and BYOB reader
-    stream = await f(testPath, [{ start: 17, end: 20 }], {
-      contentLength: testData.byteLength,
-    });
+    // Check with multiple ranges and BYOB reader
+    stream = await f(testPath, [
+      { start: 17, end: 20 },
+      { start: 22, end: 23 },
+    ]);
+    assert(Array.isArray(stream.range) && "multipartContentType" in stream);
     [contentType, boundary] = stream.multipartContentType.split("=");
     t.is(contentType, "multipart/byteranges; boundary");
-    const byobReader = stream.body.getReader({ mode: "byob" });
+    const byobReader = stream.getReader({ mode: "byob" });
     let buffer = new ArrayBuffer(128);
 
     let expected = `--${boundary}`;
@@ -191,6 +204,17 @@ const multipartMacro: Macro<[typeof createMultipartFileReadableStream]> = {
     t.deepEqual(result.value, new Uint8Array([17, 18, 19, 20]));
     buffer = result.value.buffer;
 
+    expected = `\r\n--${boundary}\r\nContent-Range: bytes 22-23/1536\r\n\r\n`;
+    result = await byobReader.read(new Uint8Array(buffer, 0, expected.length));
+    assert(!result.done);
+    t.deepEqual(utf8Decode(result.value), expected);
+    buffer = result.value.buffer;
+
+    result = await byobReader.read(new Uint8Array(buffer, 0, 2));
+    assert(!result.done);
+    t.deepEqual(result.value, new Uint8Array([22, 23]));
+    buffer = result.value.buffer;
+
     expected = `\r\n--${boundary}--`;
     result = await byobReader.read(new Uint8Array(buffer, 0, expected.length));
     assert(!result.done);
@@ -200,34 +224,43 @@ const multipartMacro: Macro<[typeof createMultipartFileReadableStream]> = {
     result = await byobReader.read(new Uint8Array(buffer));
     assert(result.done);
 
-    // Check with no ranges
-    stream = await f(testPath, [], {
-      contentLength: testData.byteLength,
-    });
+    // Check with string ranges
+    stream = await f(testPath, "bytes=1-3,7-8");
+    assert(Array.isArray(stream.range) && "multipartContentType" in stream);
     [contentType, boundary] = stream.multipartContentType.split("=");
     t.is(contentType, "multipart/byteranges; boundary");
-    actualArray = new Uint8Array(await arrayBuffer(stream.body));
-    expectedArray = utf8Encode(`--${boundary}--`);
+    actualArray = new Uint8Array(await arrayBuffer(stream));
+    expectedArray = crlfLines(
+      `--${boundary}`,
+      "Content-Range: bytes 1-3/1536",
+      "",
+      new Uint8Array([1, 2, 3]),
+      `--${boundary}`,
+      "Content-Range: bytes 7-8/1536",
+      "",
+      new Uint8Array([7, 8]),
+      `--${boundary}--`
+    );
     t.deepEqual(actualArray, expectedArray);
 
     // Check rejects invalid ranges
     await t.throwsAsync(
-      f(
-        testPath,
-        [
-          { start: 0, end: 3 },
-          { start: -1, end: 4 },
-          { start: 7, end: 9 },
-        ],
-        { contentLength: testData.byteLength }
-      ),
-      { instanceOf: AssertionError, message: "Invalid range: [-1,4]" }
+      f(testPath, [
+        { start: 0, end: 3 },
+        { start: -1, end: 4 },
+        { start: 7, end: 9 },
+      ]),
+      { instanceOf: RangeNotSatisfiableError, message: "Invalid range: [-1,4]" }
     );
     await t.throwsAsync(
-      f(testPath, [{ start: 16, end: 4 }], {
-        contentLength: testData.byteLength,
-      }),
-      { instanceOf: AssertionError, message: "Invalid range: [16,4]" }
+      f(testPath, [
+        { start: 5, end: 6 },
+        { start: 16, end: 4 },
+      ]),
+      {
+        instanceOf: RangeNotSatisfiableError,
+        message: "Invalid range: [16,4]",
+      }
     );
 
     // Check with content type
@@ -237,14 +270,12 @@ const multipartMacro: Macro<[typeof createMultipartFileReadableStream]> = {
         { start: 4, end: 6 },
         { start: 8, end: 9 },
       ],
-      {
-        contentLength: testData.byteLength,
-        contentType: "application/octet-stream",
-      }
+      { contentType: "application/octet-stream" }
     );
+    assert(Array.isArray(stream.range) && "multipartContentType" in stream);
     [contentType, boundary] = stream.multipartContentType.split("=");
     t.is(contentType, "multipart/byteranges; boundary");
-    actualArray = new Uint8Array(await arrayBuffer(stream.body));
+    actualArray = new Uint8Array(await arrayBuffer(stream));
     expectedArray = crlfLines(
       `--${boundary}`,
       "Content-Type: application/octet-stream",
@@ -263,24 +294,15 @@ const multipartMacro: Macro<[typeof createMultipartFileReadableStream]> = {
 };
 
 test(
-  "createMultipartArrayReadableStream: streams contents from array",
+  "createArrayReadableStream: streams multipart contents from array",
   multipartMacro,
-  async (_testPath, ranges, opts) =>
-    createMultipartArrayReadableStream(testData, ranges, opts)
+  (_testPath, ranges, opts) => createArrayReadableStream(testData, ranges, opts)
 );
 test(
-  "createMultipartFileReadableStream: streams file contents from disk",
+  "createFileReadableStream: streams multipart file contents from disk",
   multipartMacro,
-  createMultipartFileReadableStream
+  createFileReadableStream
 );
-test("createMultipartFileReadableStream: rejects if file not found", async (t) => {
-  const tmp = await useTmp(t);
-  const badPath = path.join(tmp, "bad.txt");
-  await t.throwsAsync(
-    createMultipartFileReadableStream(badPath, [], { contentLength: 0 }),
-    { code: "ENOENT" }
-  );
-});
 
 test("createFileWritableStream: streams file contents to disk", async (t) => {
   const tmp = await useTmp(t);

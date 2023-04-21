@@ -40,15 +40,18 @@ const getMacro: Macro<[BlobStoreFactory]> = {
         { start: 9, end: 9 },
       ],
       {
-        contentLength: 10,
         contentType: "text/plain",
       }
     );
     assert(multipartStream !== null);
+    assert(
+      Array.isArray(multipartStream.range) &&
+        "multipartContentType" in multipartStream
+    );
     const [contentType, boundary] =
       multipartStream.multipartContentType.split("=");
     t.is(contentType, "multipart/byteranges; boundary");
-    const actualText = await text(multipartStream.body);
+    const actualText = await text(multipartStream);
     const expectedText = [
       `--${boundary}`,
       "Content-Type: text/plain",
