@@ -2,7 +2,7 @@ import assert from "assert";
 import { ReadableStream } from "stream/web";
 import { base64Decode, base64Encode, defaultClock } from "../shared";
 import { MultipartOptions, PartialReadableStream, Ranges } from "./blob";
-import { TypedDatabase } from "./sql";
+import { TypedDatabase, escapeLike } from "./sql";
 import { NewStorage } from "./storage";
 
 export interface KeyEntry<Metadata = unknown> {
@@ -79,19 +79,14 @@ function sqlStmts(db: TypedDatabase) {
         limit: number;
       },
       Omit<Row, "blob_id">
-    >(
-      `SELECT key, expiration, metadata FROM _mf_entries
-        WHERE key LIKE :escaped_prefix || '%' ESCAPE '\\'
-        AND key > :start_after
-        AND (expiration IS NULL OR expiration >= :now)
-        ORDER BY key LIMIT :limit`
-    ),
+    >(`
+      SELECT key, expiration, metadata FROM _mf_entries
+      WHERE key LIKE :escaped_prefix || '%' ESCAPE '\\'
+      AND key > :start_after
+      AND (expiration IS NULL OR expiration >= :now)
+      ORDER BY key LIMIT :limit
+    `),
   };
-}
-
-function escapePrefix(prefix: string) {
-  // Prefix all instances of `\`, `_` and `%` with `\`
-  return prefix.replace(/[\\_%]/g, "\\$&");
 }
 
 function rowEntry<Metadata>(entry: Omit<Row, "blob_id">): KeyEntry<Metadata> {
@@ -191,7 +186,7 @@ export class KeyValueStorage<Metadata = unknown> {
     const now = this.clock();
     const rows = this.#stmts.list.all({
       now,
-      escaped_prefix: escapePrefix(opts.prefix ?? ""),
+      escaped_prefix: escapeLike(opts.prefix ?? ""),
       // Note the "" default here prohibits empty string keys. The consumers
       // of this class are KV and Cache. KV validates keys are non-empty.
       // Cache keys are usually URLs, but can be customised with `cf.cacheKey`.
