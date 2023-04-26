@@ -274,8 +274,16 @@ export async function sitesGatewayGet(
   if (!filePath.startsWith(persist)) return;
   try {
     return { value: await createFileReadableStream(filePath) };
-  } catch (e: any) {
-    if (e?.code === "ENOENT") return;
+  } catch (e: unknown) {
+    if (
+      typeof e === "object" &&
+      e !== null &&
+      "code" in e &&
+      // @ts-expect-error `e.code` should be `unknown`, fixed in TypeScript 4.9
+      e.code === "ENOENT"
+    ) {
+      return;
+    }
     throw e;
   }
 }
