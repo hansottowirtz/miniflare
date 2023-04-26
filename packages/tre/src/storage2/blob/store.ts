@@ -139,8 +139,16 @@ export class FileBlobStore implements BlobStore {
       } else {
         return await createFileReadableStream(filePath, ranges);
       }
-    } catch (e: any) {
-      if (e?.code === "ENOENT") return null;
+    } catch (e: unknown) {
+      if (
+        typeof e === "object" &&
+        e !== null &&
+        "code" in e &&
+        // @ts-expect-error `e.code` should be `unknown`, fixed in TypeScript 4.9
+        e.code === "ENOENT"
+      ) {
+        return null;
+      }
       throw e;
     }
   }
@@ -167,8 +175,17 @@ export class FileBlobStore implements BlobStore {
     const filePath = this.#idFilePath(id);
     try {
       if (filePath !== null) await fs.unlink(filePath);
-    } catch (e: any) {
-      if (e?.code !== "ENOENT") throw e;
+    } catch (e: unknown) {
+      if (
+        typeof e === "object" &&
+        e !== null &&
+        "code" in e &&
+        // @ts-expect-error `e.code` should be `unknown`, fixed in TypeScript 4.9
+        e.code === "ENOENT"
+      ) {
+        return;
+      }
+      throw e;
     }
   }
 }
