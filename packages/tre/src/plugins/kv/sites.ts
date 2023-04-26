@@ -291,7 +291,7 @@ export async function sitesGatewayList(
   const { limit = MAX_LIST_KEYS, prefix, cursor } = opts;
 
   // Get sorted array of all keys matching prefix
-  const keys: KVGatewayListResult["keys"] = [];
+  let keys: KVGatewayListResult["keys"] = [];
   for await (const name of walkKeys(persist)) {
     if (prefix === undefined || name.startsWith(prefix)) keys.push({ name });
   }
@@ -314,10 +314,11 @@ export async function sitesGatewayList(
   const endIndex = startIndex + limit;
   const nextCursor =
     endIndex < keys.length ? base64Encode(keys[endIndex - 1].name) : undefined;
+  keys = keys.slice(startIndex, endIndex);
 
-  return {
-    keys: keys.slice(startIndex, endIndex),
-    cursor: nextCursor,
-    list_complete: nextCursor === undefined,
-  };
+  if (nextCursor === undefined) {
+    return { keys, list_complete: true, cursor: undefined };
+  } else {
+    return { keys, list_complete: false, cursor: nextCursor };
+  }
 }

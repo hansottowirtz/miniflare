@@ -107,11 +107,12 @@ export interface KVGatewayListKey {
   expiration?: number; // seconds since unix epoch
   metadata?: string; // JSON-stringified metadata
 }
-export interface KVGatewayListResult {
+export type KVGatewayListResult = {
   keys: KVGatewayListKey[];
-  cursor?: string;
-  list_complete: boolean;
-}
+} & (
+  | { list_complete: false; cursor: string }
+  | { list_complete: true; cursor: undefined }
+);
 
 export function validateGetOptions(
   key: string,
@@ -262,15 +263,16 @@ export class KVGateway {
     validateListOptions(options);
     const { limit = MAX_LIST_KEYS, prefix, cursor } = options;
     const res = await this.storage.list({ limit, prefix, cursor });
-    return {
-      keys: res.keys.map((key) => ({
-        name: key.key,
-        expiration: maybeApply(millisToSeconds, key.expiration),
-        // workerd expects metadata to be a JSON-serialised string
-        metadata: maybeApply(JSON.stringify, key.metadata),
-      })),
-      cursor: res.cursor,
-      list_complete: res.cursor === undefined,
-    };
+    const keys = res.keys.map<KVGatewayListKey>((key) => ({
+      name: key.key,
+      expiration: maybeApply(millisToSeconds, key.expiration),
+      // workerd expects metadata to be a JSON-serialised string
+      metadata: maybeApply(JSON.stringify, key.metadata),
+    }));
+    if (res.cursor === undefined) {
+      return { keys, list_complete: true, cursor: undefined };
+    } else {
+      return { keys, list_complete: false, cursor: res.cursor };
+    }
   }
 }
