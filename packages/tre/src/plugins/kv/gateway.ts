@@ -102,12 +102,13 @@ export interface KVGatewayListOptions {
   prefix?: string;
   cursor?: string;
 }
+export interface KVGatewayListKey {
+  name: string;
+  expiration?: number; // seconds since unix epoch
+  metadata?: string; // JSON-stringified metadata
+}
 export interface KVGatewayListResult {
-  keys: {
-    name: string;
-    expiration?: number; // seconds since unix epoch
-    metadata?: string; // JSON-stringified metadata
-  }[];
+  keys: KVGatewayListKey[];
   cursor?: string;
   list_complete: boolean;
 }
