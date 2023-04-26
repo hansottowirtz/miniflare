@@ -96,7 +96,7 @@ function sqlStmts(db: TypedDatabase) {
 
 function escapePrefix(prefix: string) {
   // Prefix all instances of `\`, `_` and `%` with `\`
-  return prefix.replaceAll(/[\\_%]/g, "\\$&");
+  return prefix.replace(/[\\_%]/g, "\\$&");
 }
 
 function rowEntry<Metadata>(entry: Omit<Row, "blob_id">): KeyEntry<Metadata> {
