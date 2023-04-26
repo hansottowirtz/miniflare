@@ -3,7 +3,7 @@ import {
   Clock,
   HttpError,
   Log,
-  maybeMap,
+  maybeApply,
   millisToSeconds,
   secondsToMillis,
 } from "../../shared";
@@ -172,7 +172,7 @@ export class KVGateway {
     if (entry === null) return;
     return {
       value: entry.value,
-      expiration: maybeMap(entry.expiration, millisToSeconds),
+      expiration: maybeApply(millisToSeconds, entry.expiration),
       metadata: entry.metadata as Metadata,
     };
   }
@@ -247,7 +247,7 @@ export class KVGateway {
     return this.storage.put({
       key,
       value,
-      expiration: maybeMap(expiration, secondsToMillis),
+      expiration: maybeApply(secondsToMillis, expiration),
       metadata: options.metadata,
     });
   }
@@ -264,9 +264,9 @@ export class KVGateway {
     return {
       keys: res.keys.map((key) => ({
         name: key.key,
-        expiration: maybeMap(key.expiration, millisToSeconds),
+        expiration: maybeApply(millisToSeconds, key.expiration),
         // workerd expects metadata to be a JSON-serialised string
-        metadata: maybeMap(key.metadata, JSON.stringify),
+        metadata: maybeApply(JSON.stringify, key.metadata),
       })),
       cursor: res.cursor,
       list_complete: res.cursor === undefined,
