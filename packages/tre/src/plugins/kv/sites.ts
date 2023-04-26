@@ -36,7 +36,7 @@ import {
   validateListOptions,
 } from "./gateway";
 
-async function* walkKeysInner(
+async function* listKeysInDirectoryInner(
   rootPath: string,
   currentPath: string
 ): AsyncGenerator<string> {
@@ -44,7 +44,7 @@ async function* walkKeysInner(
   for (const fileEntry of fileEntries) {
     const filePath = path.join(currentPath, fileEntry.name);
     if (fileEntry.isDirectory()) {
-      yield* walkKeysInner(rootPath, filePath);
+      yield* listKeysInDirectoryInner(rootPath, filePath);
     } else {
       // Get key name by removing root directory & path separator
       // (assumes `rootPath` is fully-resolved)
@@ -52,9 +52,9 @@ async function* walkKeysInner(
     }
   }
 }
-function walkKeys(rootPath: string): AsyncGenerator<string> {
+function listKeysInDirectory(rootPath: string): AsyncGenerator<string> {
   rootPath = path.resolve(rootPath);
-  return walkKeysInner(rootPath, rootPath);
+  return listKeysInDirectoryInner(rootPath, rootPath);
 }
 
 export interface SitesOptions {
@@ -191,7 +191,7 @@ export async function getSitesBindings(
 
   // Build __STATIC_CONTENT_MANIFEST contents
   const staticContentManifest: Record<string, string> = {};
-  for await (const key of walkKeys(options.sitePath)) {
+  for await (const key of listKeysInDirectory(options.sitePath)) {
     if (testSiteRegExps(siteRegExps, key)) {
       staticContentManifest[key] = encodeSitesKey(key);
     }
@@ -292,7 +292,7 @@ export async function sitesGatewayList(
 
   // Get sorted array of all keys matching prefix
   let keys: KVGatewayListResult["keys"] = [];
-  for await (const name of walkKeys(persist)) {
+  for await (const name of listKeysInDirectory(persist)) {
     if (prefix === undefined || name.startsWith(prefix)) keys.push({ name });
   }
   keys.sort((a, b) => lexicographicCompare(a.name, b.name));
