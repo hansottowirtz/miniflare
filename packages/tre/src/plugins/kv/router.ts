@@ -109,7 +109,9 @@ export class KVRouter extends Router<KVGateway> {
     // stream to count it (trusting `workerd` to send correct value here).
     // Safety of `!`: `parseInt(null)` is `NaN`
     const contentLength = parseInt(req.headers.get("Content-Length")!);
-    const valueLengthHint = isNaN(contentLength) ? undefined : contentLength;
+    const valueLengthHint = Number.isNaN(contentLength)
+      ? undefined
+      : contentLength;
 
     await gateway.put(key, value, {
       expiration,
