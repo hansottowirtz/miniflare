@@ -129,7 +129,7 @@ export class KeyValueStorage<Metadata = unknown> {
     // unguessable, so if there aren't any references to them, they can't be
     // accessed. This means if we fail to delete a blob for any reason, it
     // doesn't matter, we'll just have a dangling file taking up disk space.
-    void this.storage.blob.delete(blobId).catch(() => {});
+    queueMicrotask(() => this.storage.blob.delete(blobId).catch(() => {}));
   }
 
   get(
