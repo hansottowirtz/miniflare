@@ -41,6 +41,7 @@ import {
   getGlobalServices,
   maybeGetSitesManifestModule,
   normaliseDurableObject,
+  Persistence,
 } from "./plugins";
 import {
   HEADER_CUSTOM_SERVICE,
@@ -74,6 +75,7 @@ import {
   formatResponse,
 } from "./shared";
 import { anyAbortSignal } from "./shared/signal";
+import { NewStorage } from "./storage2";
 import { waitForRequest } from "./wait";
 
 // ===== `Miniflare` User Options =====
@@ -850,6 +852,17 @@ export class Miniflare {
     }
 
     return response;
+  }
+
+  /** @internal */
+  _getPluginStorage(
+    plugin: keyof Plugins,
+    namespace: string,
+    persist?: Persistence
+  ): NewStorage {
+    const factory = this.#gatewayFactories[plugin];
+    assert(factory !== undefined);
+    return factory.getStorage(namespace, persist).getNewStorage();
   }
 
   async dispose(): Promise<void> {

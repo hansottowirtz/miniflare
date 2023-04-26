@@ -1,6 +1,6 @@
 import assert from "assert";
 import { R2StringChecksums } from "@cloudflare/workers-types/experimental";
-import { InclusiveRange, _parseRangeHeader } from "../../storage2";
+import { _parseRangeHeader, InclusiveRange } from "../../storage2";
 import {
   BadDigest,
   EntityTooLarge,
@@ -101,13 +101,11 @@ export class Validator {
   }
 
   condition(
-    meta?: R2Object | Pick<R2Object, "etag" | "uploaded">,
+    meta?: Pick<R2Object, "etag" | "uploaded">,
     onlyIf?: R2Conditional
   ): Validator {
     if (onlyIf !== undefined && !_testR2Conditional(onlyIf, meta)) {
-      let error = new PreconditionFailed();
-      if (meta instanceof R2Object) error = error.attach(meta);
-      throw error;
+      throw new PreconditionFailed();
     }
     return this;
   }
