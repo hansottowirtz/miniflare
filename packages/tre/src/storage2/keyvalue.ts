@@ -119,7 +119,7 @@ export class KeyValueStorage<Metadata = unknown> {
     this.#stmts = sqlStmts(storage.db);
   }
 
-  #expired(entry: Pick<Row, "expiration">) {
+  #hasExpired(entry: Pick<Row, "expiration">) {
     return entry.expiration !== null && entry.expiration < this.clock();
   }
 
@@ -152,7 +152,7 @@ export class KeyValueStorage<Metadata = unknown> {
     const row = this.#stmts.getByKey.get({ key });
     if (row === undefined) return null;
 
-    if (this.#expired(row)) {
+    if (this.#hasExpired(row)) {
       // If expired, delete from metadata and blob stores. Assuming a
       // monotonically increasing clock, this doesn't need to be in a
       // transaction with the above get. If we call `get()` again, the current
@@ -212,7 +212,7 @@ export class KeyValueStorage<Metadata = unknown> {
     // Garbage collect deleted entry's blob
     this.#backgroundDelete(row.blob_id);
     // Return true iff this entry hasn't expired
-    return !this.#expired(row);
+    return !this.#hasExpired(row);
   }
 
   async list(opts: KeyEntriesQuery): Promise<KeyEntries<Metadata>> {
